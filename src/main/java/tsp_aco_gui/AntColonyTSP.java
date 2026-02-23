@@ -1,14 +1,14 @@
 package tsp_aco_gui;
 
+import javax.imageio.ImageIO;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.awt.geom.Ellipse2D;
 import java.awt.image.BufferedImage;
-import javax.imageio.ImageIO;
-import java.io.InputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
@@ -71,31 +71,484 @@ public class AntColonyTSP extends JFrame {
      * adjust the overlay further simply tweak these numbers.
      */
     private static final double[][] NYC_RELATIVE_COORDS = {
-        {0.345, 0.443}, // Times Square
-        {0.535, 0.277}, // Central Park
-        {0.343, 0.511}, // Empire State
-        {0.231, 0.814}, // Brooklyn Bridge
-        {0.000, 0.934}, // Statue of Liberty (clamped to left edge)
-        {0.114, 0.814}, // Wall Street
-        {0.428, 0.481}, // Grand Central
-        {0.066, 0.766}  // One World Trade
+            {0.345, 0.443}, // Times Square
+            {0.535, 0.277}, // Central Park
+            {0.343, 0.511}, // Empire State
+            {0.231, 0.814}, // Brooklyn Bridge
+            {0.000, 0.934}, // Statue of Liberty (clamped to left edge)
+            {0.114, 0.814}, // Wall Street
+            {0.428, 0.481}, // Grand Central
+            {0.066, 0.766}  // One World Trade
     };
+    // GUI fields
+    private final DrawingPanel drawingPanel;
+    private final JTextField antsField;
+    private final JTextField iterationsField;
+    private final JTextField alphaField;
+    private final JTextField betaField;
+    private final JTextField evaporationField;
+    private final JTextField qField;
+    private final JComboBox<String> datasetCombo;
+    private final JCheckBox blockCheck;
+    private final JLabel statusLabel;
+    // Text field to specify number of cities for random instances.  This
+    // value is ignored when the NYC dataset is selected.
+    private final JTextField cityCountField;
+    private City[] cities;
+    private double[][] distances;
+    private boolean[][] blocked;
+    private int[] bestTour;
+    private List<int[]> currentTours;
+    // Array of colours used to draw each ant's tour.  This array is
+    // initialised when a simulation starts and contains one entry per
+    // ant.  If there are more ants than colours, the colours will be
+    // reused in a cyclic manner.
+    private Color[] antColors;
+    // flag indicating whether a simulation is currently running
+    private volatile boolean simulationRunning = false;
+    // Slider controlling the delay between iterations in milliseconds.  The
+    // user can move this during a run to speed up or slow down the
+    // animation.  See runSimulation() for how it is used.  The
+    // corresponding animationDelay field is updated via a change
+    // listener attached to this slider.
+    private final JSlider speedSlider;
+    // Current delay between iterations.  Declared volatile so that
+    // updates from the UI thread are visible to the background
+    // simulation thread.
+    private volatile int animationDelay = 200;
     /**
-     * Represents a city with a name and geographic coordinates.  The
-     * x/y values are interpreted as screen coordinates when drawing
-     * random instances.  For the NYC example they correspond to
-     * latitude and longitude values (degrees) which are rescaled for
-     * display.
+     * Background map image for the NYC example.  This image is loaded from
+     * the resources folder when the frame is constructed.  The file is
+     * derived from the Wikimedia Commons file "New York City location
+     * Manhattan.svg" and is licensed under the Creative Commons
+     * Attribution 3.0 Unported licence.  The image highlights Manhattan in
+     * red and provides geographical context for the NYC example.  If the
+     * image cannot be found on the classpath it will be attempted to load
+     * from the relative path "resources/nyc_map.png".
      */
-    static class City {
-        final String name;
-        final double x;
-        final double y;
-        City(String name, double x, double y) {
-            this.name = name;
-            this.x = x;
-            this.y = y;
+    private BufferedImage nycMapImage;
+    public AntColonyTSP() {
+        super("TSP with Ant Colony Optimisation");
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setLayout(new BorderLayout());
+        drawingPanel = new DrawingPanel();
+        drawingPanel.setPreferredSize(new Dimension(800, 600));
+        add(drawingPanel, BorderLayout.CENTER);
+
+        // Attempt to load the NYC map image from the file system first.  By
+        // prioritising the local file before classpath resources we reduce
+        // the likelihood of a missing map when running from within an IDE
+        // such as VS Code.  The image is expected to reside in a
+        // "resources" folder alongside the compiled classes.  If it
+        // cannot be found there we try alternative locations and finally
+        // fall back to loading from the classpath.
+        nycMapImage = null;
+        String[] fileNames = {
+                "resources/nyc_map.png",
+                "tsp_aco_gui/resources/nyc_map.png",
+                "nyc_map.png"
+        };
+        for (String name : fileNames) {
+            if (nycMapImage != null) break;
+            java.io.File f = new java.io.File(name);
+            if (f.exists()) {
+                try {
+                    nycMapImage = ImageIO.read(f);
+                } catch (IOException ignore) {
+                    // ignore and try next
+                }
+            }
         }
+        if (nycMapImage == null) {
+            // load from classpath if not found on disk
+            String[] resourceNames = {
+                    "/nyc_map.png",
+                    "/resources/nyc_map.png",
+                    "/tsp_aco_gui/resources/nyc_map.png",
+                    "nyc_map.png",
+                    "resources/nyc_map.png",
+                    "tsp_aco_gui/resources/nyc_map.png"
+            };
+            for (String res : resourceNames) {
+                if (nycMapImage != null) break;
+                try {
+                    InputStream in = AntColonyTSP.class.getResourceAsStream(res);
+                    if (in != null) {
+                        nycMapImage = ImageIO.read(in);
+                    }
+                } catch (IOException ignore) {
+                    // ignore and try next
+                }
+            }
+        }
+        if (nycMapImage == null) {
+            System.err.println("Warning: could not load NYC map image from any known location. The NYC example will be drawn without a map.");
+        }
+        // Controls
+        JPanel controlPanel = new JPanel();
+        controlPanel.setLayout(new GridLayout(0, 2));
+        antsField = new JTextField("50", 5);
+        iterationsField = new JTextField("100", 5);
+        alphaField = new JTextField("1.0", 5);
+        betaField = new JTextField("5.0", 5);
+        evaporationField = new JTextField("0.5", 5);
+        qField = new JTextField("100.0", 5);
+        datasetCombo = new JComboBox<>(new String[]{"Random", "NYC Example"});
+        blockCheck = new JCheckBox("Block road (NYC)");
+        // field to allow the user to set the number of cities for random
+        // instances.  Default to 10 cities.  It will be enabled only
+        // when the random dataset is selected.
+        cityCountField = new JTextField("10", 5);
+        // Initially the random dataset is selected, so enable the
+        // city count field and disable the road block checkbox because
+        // there is no fixed road network in random instances.
+        cityCountField.setEnabled(true);
+        blockCheck.setEnabled(false);
+
+        // Create a slider to control the delay between iterations.  The
+        // minimum delay of 0 ms gives essentially instantaneous updates,
+        // while the maximum delay of 1000 ms produces a very slow
+        // animation.  The initial value of 200 ms matches the original
+        // fixed delay.
+        speedSlider = new JSlider(JSlider.HORIZONTAL, 0, 1000, animationDelay);
+        speedSlider.setMajorTickSpacing(250);
+        speedSlider.setMinorTickSpacing(50);
+        speedSlider.setPaintTicks(true);
+        speedSlider.setPaintLabels(true);
+        // Update the animation delay whenever the slider is adjusted.  This
+        // method is called on the event dispatch thread, so using a
+        // volatile field ensures visibility to the background thread.
+        speedSlider.addChangeListener(e -> {
+            animationDelay = speedSlider.getValue();
+        });
+        controlPanel.add(new JLabel("Number of ants:"));
+        controlPanel.add(antsField);
+        controlPanel.add(new JLabel("Iterations:"));
+        controlPanel.add(iterationsField);
+        controlPanel.add(new JLabel("Alpha (pheromone importance):"));
+        controlPanel.add(alphaField);
+        controlPanel.add(new JLabel("Beta (heuristic importance):"));
+        controlPanel.add(betaField);
+        controlPanel.add(new JLabel("Evaporation rate (rho):"));
+        controlPanel.add(evaporationField);
+        controlPanel.add(new JLabel("Q (pheromone deposit):"));
+        controlPanel.add(qField);
+        controlPanel.add(new JLabel("Dataset:"));
+        controlPanel.add(datasetCombo);
+        // number of cities field for random dataset
+        controlPanel.add(new JLabel("Cities:"));
+        controlPanel.add(cityCountField);
+        controlPanel.add(blockCheck);
+        // Slider to adjust animation speed (delay between iterations)
+        controlPanel.add(new JLabel("Delay (ms):"));
+        controlPanel.add(speedSlider);
+        JButton runButton = new JButton("Run simulation");
+        controlPanel.add(runButton);
+        JButton newRandomButton = new JButton("Generate Random");
+        controlPanel.add(newRandomButton);
+        // Status label spans two columns
+        statusLabel = new JLabel("Ready");
+        controlPanel.add(statusLabel);
+        controlPanel.add(new JLabel(""));
+        add(controlPanel, BorderLayout.SOUTH);
+        // Action listeners
+        newRandomButton.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                // parse the number of cities from the user-input field.
+                int n;
+                try {
+                    n = Integer.parseInt(cityCountField.getText().trim());
+                    if (n < 2) {
+                        throw new NumberFormatException("Number of cities must be >= 2");
+                    }
+                } catch (NumberFormatException ex) {
+                    JOptionPane.showMessageDialog(AntColonyTSP.this,
+                            "Invalid number of cities: " + ex.getMessage(),
+                            "Error", JOptionPane.ERROR_MESSAGE);
+                    n = 10;
+                    cityCountField.setText(Integer.toString(n));
+                }
+                loadRandomCities(n);
+                bestTour = null;
+                drawingPanel.repaint();
+            }
+        });
+        datasetCombo.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                String sel = (String) datasetCombo.getSelectedItem();
+                if ("NYC Example".equals(sel)) {
+                    loadNYCCities();
+                    // Disable city count field since the number of cities is fixed
+                    cityCountField.setEnabled(false);
+                    // Enable road block checkbox for the NYC example
+                    blockCheck.setEnabled(true);
+                } else {
+                    // Random dataset selected. Enable city count field and disable road block
+                    cityCountField.setEnabled(true);
+                    blockCheck.setEnabled(false);
+                    // Determine how many cities to load
+                    int n;
+                    try {
+                        n = Integer.parseInt(cityCountField.getText().trim());
+                        if (n < 2) {
+                            throw new NumberFormatException("Number of cities must be >= 2");
+                        }
+                    } catch (NumberFormatException ex2) {
+                        JOptionPane.showMessageDialog(AntColonyTSP.this,
+                                "Invalid number of cities: " + ex2.getMessage(),
+                                "Error", JOptionPane.ERROR_MESSAGE);
+                        n = 10;
+                        cityCountField.setText(Integer.toString(n));
+                    }
+                    loadRandomCities(n);
+                }
+                bestTour = null;
+                drawingPanel.repaint();
+            }
+        });
+        runButton.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                if (!simulationRunning) {
+                    runSimulation();
+                }
+            }
+        });
+        // initial dataset: load the random instance using the value from the city count field.
+        int initialCities;
+        try {
+            initialCities = Integer.parseInt(cityCountField.getText().trim());
+            if (initialCities < 2) {
+                initialCities = 10;
+            }
+        } catch (NumberFormatException ex) {
+            initialCities = 10;
+        }
+        loadRandomCities(initialCities);
+        pack();
+        setLocationRelativeTo(null);
+        setVisible(true);
+    }
+
+    static void main(String[] args) {
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override
+            public void run() {
+                new AntColonyTSP();
+            }
+        });
+    }
+
+    /**
+     * Generates a random TSP instance with the given number of cities.
+     */
+    private void loadRandomCities(int n) {
+        Random r = new Random();
+        cities = new City[n];
+        for (int i = 0; i < n; i++) {
+            double x = 50 + r.nextDouble() * (drawingPanel.getWidth() - 100);
+            double y = 50 + r.nextDouble() * (drawingPanel.getHeight() - 100);
+            cities[i] = new City("C" + i, x, y);
+        }
+        computeDistances();
+        blocked = new boolean[n][n];
+    }
+
+    /**
+     * Loads the NYC example with fixed coordinates and names.  Distances
+     * are computed using the haversine formula to approximate the road
+     * network.  A specific edge (Times Square to Central Park) can be
+     * blocked using the checkbox.
+     */
+    private void loadNYCCities() {
+        cities = new City[]{
+                new City("Times Square", 40.7580, -73.9855),
+                new City("Central Park", 40.7812, -73.9665),
+                new City("Empire State", 40.7484, -73.9857),
+                new City("Brooklyn Bridge", 40.7061, -73.9969),
+                new City("Statue of Liberty", 40.6892, -74.0445),
+                new City("Wall Street", 40.7060, -74.0086),
+                new City("Grand Central", 40.7527, -73.9772),
+                new City("One World Trade", 40.7127, -74.0134)
+        };
+        computeDistancesHaversine();
+        blocked = new boolean[cities.length][cities.length];
+        // optionally block the edge between Times Square (0) and Central Park (1)
+        // the checkbox state will be evaluated at run time
+    }
+
+    /**
+     * Computes Euclidean distances between cities for the random instance.
+     */
+    private void computeDistances() {
+        int n = cities.length;
+        distances = new double[n][n];
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < n; j++) {
+                if (i == j) {
+                    distances[i][j] = 0;
+                } else {
+                    double dx = cities[i].x - cities[j].x;
+                    double dy = cities[i].y - cities[j].y;
+                    distances[i][j] = Math.hypot(dx, dy);
+                }
+            }
+        }
+    }
+
+    /**
+     * Computes geodesic distances using the haversine formula for NYC.
+     */
+    private void computeDistancesHaversine() {
+        int n = cities.length;
+        distances = new double[n][n];
+        double R = 6371.0; // Earth radius in km
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < n; j++) {
+                if (i == j) {
+                    distances[i][j] = 0;
+                } else {
+                    double lat1 = Math.toRadians(cities[i].x);
+                    double lon1 = Math.toRadians(cities[i].y);
+                    double lat2 = Math.toRadians(cities[j].x);
+                    double lon2 = Math.toRadians(cities[j].y);
+                    double dlat = lat2 - lat1;
+                    double dlon = lon2 - lon1;
+                    double a = Math.sin(dlat / 2) * Math.sin(dlat / 2) +
+                            Math.cos(lat1) * Math.cos(lat2) *
+                                    Math.sin(dlon / 2) * Math.sin(dlon / 2);
+                    double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+                    distances[i][j] = R * c; // kilometres
+                }
+            }
+        }
+    }
+
+    /**
+     * Runs the ACO algorithm in simulation mode.  A solver instance is
+     * created from the current parameter settings and the selected
+     * dataset (random or NYC).  Each iteration constructs tours for
+     * every ant, updates pheromones and the best tour, and repaints
+     * the drawing panel to visualise progress.  A small delay between
+     * iterations allows the user to observe the process.  All work is
+     * performed on a background thread to keep the UI responsive.
+     */
+    private void runSimulation() {
+        // parse parameters
+        final int ants;
+        final int iterations;
+        final double alpha;
+        final double beta;
+        final double evap;
+        final double Q;
+        try {
+            ants = Integer.parseInt(antsField.getText().trim());
+            iterations = Integer.parseInt(iterationsField.getText().trim());
+            alpha = Double.parseDouble(alphaField.getText().trim());
+            beta = Double.parseDouble(betaField.getText().trim());
+            evap = Double.parseDouble(evaporationField.getText().trim());
+            Q = Double.parseDouble(qField.getText().trim());
+        } catch (NumberFormatException ex) {
+            JOptionPane.showMessageDialog(this, "Invalid parameter: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        // prepare blocked edges for NYC
+        if ("NYC Example".equals(datasetCombo.getSelectedItem())) {
+            for (int i = 0; i < blocked.length; i++) {
+                for (int j = 0; j < blocked.length; j++) {
+                    blocked[i][j] = false;
+                }
+            }
+            if (blockCheck.isSelected()) {
+                blocked[0][1] = true;
+                blocked[1][0] = true;
+            }
+        }
+        simulationRunning = true;
+        currentTours = null;
+        statusLabel.setText("Running...");
+        // disable input fields during simulation
+        antsField.setEnabled(false);
+        iterationsField.setEnabled(false);
+        alphaField.setEnabled(false);
+        betaField.setEnabled(false);
+        evaporationField.setEnabled(false);
+        qField.setEnabled(false);
+        datasetCombo.setEnabled(false);
+        blockCheck.setEnabled(false);
+        cityCountField.setEnabled(false);
+        // create solver instance
+        final ACO solver = new ACO(ants, iterations, alpha, beta, evap, Q, distances, blocked);
+
+        // Generate a distinct colour palette for each ant.  We use
+        // uniformly spaced hues in the HSB colour space to ensure
+        // clearly distinguishable colours.  Saturation and brightness
+        // values are set to 0.7 for vivid pastel tones.  The array
+        // length equals the number of ants specified by the user.
+        antColors = new Color[ants];
+        for (int i = 0; i < ants; i++) {
+            float hue = i / (float) ants;
+            antColors[i] = Color.getHSBColor(hue, 0.7f, 0.8f);
+        }
+        bestTour = null;
+        // run on new thread
+        new Thread(() -> {
+            for (int iter = 0; iter < iterations && simulationRunning; iter++) {
+                // perform one iteration and capture tours
+                currentTours = solver.iterateOnce();
+                bestTour = solver.bestTour;
+                // update UI on EDT
+                int iterDisplay = iter + 1;
+                double lengthDisplay = solver.bestLength;
+                SwingUtilities.invokeLater(() -> {
+                    drawingPanel.repaint();
+                    statusLabel.setText(String.format("Iteration %d / %d, best length: %.2f", iterDisplay, iterations, lengthDisplay));
+                });
+                // delay to visualise progress.  The current animationDelay
+                // value is read on each iteration; it can be modified via
+                // the speed slider while the simulation is running.
+                try {
+                    Thread.sleep(animationDelay);
+                } catch (InterruptedException e) {
+                    // ignore
+                }
+            }
+            // simulation finished
+            SwingUtilities.invokeLater(() -> {
+                simulationRunning = false;
+                statusLabel.setText(String.format("Finished. Best length: %.2f", solver.bestLength));
+                // re-enable controls
+                antsField.setEnabled(true);
+                iterationsField.setEnabled(true);
+                alphaField.setEnabled(true);
+                betaField.setEnabled(true);
+                evaporationField.setEnabled(true);
+                qField.setEnabled(true);
+                datasetCombo.setEnabled(true);
+                blockCheck.setEnabled(true);
+                // re-enable city count field only when the random dataset is selected
+                if ("Random".equals(datasetCombo.getSelectedItem())) {
+                    cityCountField.setEnabled(true);
+                    // disable road block checkbox for random dataset
+                    blockCheck.setEnabled(false);
+                }
+                JOptionPane.showMessageDialog(AntColonyTSP.this,
+                        String.format("Best tour length: %.2f", solver.bestLength),
+                        "ACO result", JOptionPane.INFORMATION_MESSAGE);
+            });
+        }).start();
+    }
+
+    /**
+         * Represents a city with a name and geographic coordinates.  The
+         * x/y values are interpreted as screen coordinates when drawing
+         * random instances.  For the NYC example they correspond to
+         * latitude and longitude values (degrees) which are rescaled for
+         * display.
+         */
+        record City(String name, double x, double y) {
     }
 
     /**
@@ -114,13 +567,13 @@ public class AntColonyTSP extends JFrame {
         final double[][] distances;
         final boolean[][] blocked; // edges flagged as blocked
         final int numCities;
-        double[][] pheromones;
-        int[] bestTour;
-        double bestLength = Double.MAX_VALUE;
         // random number generator used during construction of tours.  Note that
         // this instance is not used within parallel regions; thread-local
         // random is employed there for safety.
         final Random rng = new Random();
+        double[][] pheromones;
+        int[] bestTour;
+        double bestLength = Double.MAX_VALUE;
 
         ACO(int numAnts, int maxIterations, double alpha, double beta,
             double evaporation, double Q, double[][] distances,
@@ -162,7 +615,7 @@ public class AntColonyTSP extends JFrame {
          * simulation of the algorithm.
          *
          * @return a list of tours, where each tour is represented as an array of
-         *         city indices.
+         * city indices.
          */
         public List<int[]> iterateOnce() {
             // Arrays to hold tours and lengths for each ant.  Using fixed
@@ -340,466 +793,12 @@ public class AntColonyTSP extends JFrame {
         }
     }
 
-    // GUI fields
-    private final DrawingPanel drawingPanel;
-    private final JTextField antsField;
-    private final JTextField iterationsField;
-    private final JTextField alphaField;
-    private final JTextField betaField;
-    private final JTextField evaporationField;
-    private final JTextField qField;
-    private final JComboBox<String> datasetCombo;
-    private final JCheckBox blockCheck;
-    private final JLabel statusLabel;
-    // Text field to specify number of cities for random instances.  This
-    // value is ignored when the NYC dataset is selected.
-    private final JTextField cityCountField;
-    private City[] cities;
-    private double[][] distances;
-    private boolean[][] blocked;
-    private int[] bestTour;
-    private List<int[]> currentTours;
-    // Array of colours used to draw each ant's tour.  This array is
-    // initialised when a simulation starts and contains one entry per
-    // ant.  If there are more ants than colours, the colours will be
-    // reused in a cyclic manner.
-    private Color[] antColors;
-    // flag indicating whether a simulation is currently running
-    private volatile boolean simulationRunning = false;
-
-    // Slider controlling the delay between iterations in milliseconds.  The
-    // user can move this during a run to speed up or slow down the
-    // animation.  See runSimulation() for how it is used.  The
-    // corresponding animationDelay field is updated via a change
-    // listener attached to this slider.
-    private JSlider speedSlider;
-    // Current delay between iterations.  Declared volatile so that
-    // updates from the UI thread are visible to the background
-    // simulation thread.
-    private volatile int animationDelay = 200;
-
-    /**
-     * Background map image for the NYC example.  This image is loaded from
-     * the resources folder when the frame is constructed.  The file is
-     * derived from the Wikimedia Commons file "New York City location
-     * Manhattan.svg" and is licensed under the Creative Commons
-     * Attribution 3.0 Unported licence.  The image highlights Manhattan in
-     * red and provides geographical context for the NYC example.  If the
-     * image cannot be found on the classpath it will be attempted to load
-     * from the relative path "resources/nyc_map.png".
-     */
-    private BufferedImage nycMapImage;
-
-    public AntColonyTSP() {
-        super("TSP with Ant Colony Optimisation");
-        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        setLayout(new BorderLayout());
-        drawingPanel = new DrawingPanel();
-        drawingPanel.setPreferredSize(new Dimension(800, 600));
-        add(drawingPanel, BorderLayout.CENTER);
-
-        // Attempt to load the NYC map image from the file system first.  By
-        // prioritising the local file before classpath resources we reduce
-        // the likelihood of a missing map when running from within an IDE
-        // such as VS Code.  The image is expected to reside in a
-        // "resources" folder alongside the compiled classes.  If it
-        // cannot be found there we try alternative locations and finally
-        // fall back to loading from the classpath.
-        nycMapImage = null;
-        String[] fileNames = {
-            "resources/nyc_map.png",
-            "tsp_aco_gui/resources/nyc_map.png",
-            "nyc_map.png"
-        };
-        for (String name : fileNames) {
-            if (nycMapImage != null) break;
-            java.io.File f = new java.io.File(name);
-            if (f.exists()) {
-                try {
-                    nycMapImage = ImageIO.read(f);
-                } catch (IOException ignore) {
-                    // ignore and try next
-                }
-            }
-        }
-        if (nycMapImage == null) {
-            // load from classpath if not found on disk
-            String[] resourceNames = {
-                "/nyc_map.png",
-                "/resources/nyc_map.png",
-                "/tsp_aco_gui/resources/nyc_map.png",
-                "nyc_map.png",
-                "resources/nyc_map.png",
-                "tsp_aco_gui/resources/nyc_map.png"
-            };
-            for (String res : resourceNames) {
-                if (nycMapImage != null) break;
-                try {
-                    InputStream in = AntColonyTSP.class.getResourceAsStream(res);
-                    if (in != null) {
-                        nycMapImage = ImageIO.read(in);
-                    }
-                } catch (IOException ignore) {
-                    // ignore and try next
-                }
-            }
-        }
-        if (nycMapImage == null) {
-            System.err.println("Warning: could not load NYC map image from any known location. The NYC example will be drawn without a map.");
-        }
-        // Controls
-        JPanel controlPanel = new JPanel();
-        controlPanel.setLayout(new GridLayout(0, 2));
-        antsField = new JTextField("50", 5);
-        iterationsField = new JTextField("100", 5);
-        alphaField = new JTextField("1.0", 5);
-        betaField = new JTextField("5.0", 5);
-        evaporationField = new JTextField("0.5", 5);
-        qField = new JTextField("100.0", 5);
-        datasetCombo = new JComboBox<>(new String[]{"Random", "NYC Example"});
-        blockCheck = new JCheckBox("Block road (NYC)");
-        // field to allow the user to set the number of cities for random
-        // instances.  Default to 10 cities.  It will be enabled only
-        // when the random dataset is selected.
-        cityCountField = new JTextField("10", 5);
-        // Initially the random dataset is selected, so enable the
-        // city count field and disable the road block checkbox because
-        // there is no fixed road network in random instances.
-        cityCountField.setEnabled(true);
-        blockCheck.setEnabled(false);
-
-        // Create a slider to control the delay between iterations.  The
-        // minimum delay of 0 ms gives essentially instantaneous updates,
-        // while the maximum delay of 1000 ms produces a very slow
-        // animation.  The initial value of 200 ms matches the original
-        // fixed delay.
-        speedSlider = new JSlider(JSlider.HORIZONTAL, 0, 1000, animationDelay);
-        speedSlider.setMajorTickSpacing(250);
-        speedSlider.setMinorTickSpacing(50);
-        speedSlider.setPaintTicks(true);
-        speedSlider.setPaintLabels(true);
-        // Update the animation delay whenever the slider is adjusted.  This
-        // method is called on the event dispatch thread, so using a
-        // volatile field ensures visibility to the background thread.
-        speedSlider.addChangeListener(e -> {
-            animationDelay = speedSlider.getValue();
-        });
-        controlPanel.add(new JLabel("Number of ants:"));
-        controlPanel.add(antsField);
-        controlPanel.add(new JLabel("Iterations:"));
-        controlPanel.add(iterationsField);
-        controlPanel.add(new JLabel("Alpha (pheromone importance):"));
-        controlPanel.add(alphaField);
-        controlPanel.add(new JLabel("Beta (heuristic importance):"));
-        controlPanel.add(betaField);
-        controlPanel.add(new JLabel("Evaporation rate (rho):"));
-        controlPanel.add(evaporationField);
-        controlPanel.add(new JLabel("Q (pheromone deposit):"));
-        controlPanel.add(qField);
-        controlPanel.add(new JLabel("Dataset:"));
-        controlPanel.add(datasetCombo);
-        // number of cities field for random dataset
-        controlPanel.add(new JLabel("Cities:"));
-        controlPanel.add(cityCountField);
-        controlPanel.add(blockCheck);
-        // Slider to adjust animation speed (delay between iterations)
-        controlPanel.add(new JLabel("Delay (ms):"));
-        controlPanel.add(speedSlider);
-        JButton runButton = new JButton("Run simulation");
-        controlPanel.add(runButton);
-        JButton newRandomButton = new JButton("Generate Random");
-        controlPanel.add(newRandomButton);
-        // Status label spans two columns
-        statusLabel = new JLabel("Ready");
-        controlPanel.add(statusLabel);
-        controlPanel.add(new JLabel(""));
-        add(controlPanel, BorderLayout.SOUTH);
-        // Action listeners
-        newRandomButton.addActionListener(new ActionListener() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                // parse the number of cities from the user-input field.
-                int n;
-                try {
-                    n = Integer.parseInt(cityCountField.getText().trim());
-                    if (n < 2) {
-                        throw new NumberFormatException("Number of cities must be >= 2");
-                    }
-                } catch (NumberFormatException ex) {
-                    JOptionPane.showMessageDialog(AntColonyTSP.this,
-                            "Invalid number of cities: " + ex.getMessage(),
-                            "Error", JOptionPane.ERROR_MESSAGE);
-                    n = 10;
-                    cityCountField.setText(Integer.toString(n));
-                }
-                loadRandomCities(n);
-                bestTour = null;
-                drawingPanel.repaint();
-            }
-        });
-        datasetCombo.addActionListener(new ActionListener() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                String sel = (String) datasetCombo.getSelectedItem();
-                if ("NYC Example".equals(sel)) {
-                    loadNYCCities();
-                    // Disable city count field since the number of cities is fixed
-                    cityCountField.setEnabled(false);
-                    // Enable road block checkbox for the NYC example
-                    blockCheck.setEnabled(true);
-                } else {
-                    // Random dataset selected. Enable city count field and disable road block
-                    cityCountField.setEnabled(true);
-                    blockCheck.setEnabled(false);
-                    // Determine how many cities to load
-                    int n;
-                    try {
-                        n = Integer.parseInt(cityCountField.getText().trim());
-                        if (n < 2) {
-                            throw new NumberFormatException("Number of cities must be >= 2");
-                        }
-                    } catch (NumberFormatException ex2) {
-                        JOptionPane.showMessageDialog(AntColonyTSP.this,
-                                "Invalid number of cities: " + ex2.getMessage(),
-                                "Error", JOptionPane.ERROR_MESSAGE);
-                        n = 10;
-                        cityCountField.setText(Integer.toString(n));
-                    }
-                    loadRandomCities(n);
-                }
-                bestTour = null;
-                drawingPanel.repaint();
-            }
-        });
-        runButton.addActionListener(new ActionListener() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                if (!simulationRunning) {
-                    runSimulation();
-                }
-            }
-        });
-        // initial dataset: load the random instance using the value from the city count field.
-        int initialCities;
-        try {
-            initialCities = Integer.parseInt(cityCountField.getText().trim());
-            if (initialCities < 2) {
-                initialCities = 10;
-            }
-        } catch (NumberFormatException ex) {
-            initialCities = 10;
-        }
-        loadRandomCities(initialCities);
-        pack();
-        setLocationRelativeTo(null);
-        setVisible(true);
-    }
-
-    /**
-     * Generates a random TSP instance with the given number of cities.
-     */
-    private void loadRandomCities(int n) {
-        Random r = new Random();
-        cities = new City[n];
-        for (int i = 0; i < n; i++) {
-            double x = 50 + r.nextDouble() * (drawingPanel.getWidth() - 100);
-            double y = 50 + r.nextDouble() * (drawingPanel.getHeight() - 100);
-            cities[i] = new City("C" + i, x, y);
-        }
-        computeDistances();
-        blocked = new boolean[n][n];
-    }
-
-    /**
-     * Loads the NYC example with fixed coordinates and names.  Distances
-     * are computed using the haversine formula to approximate the road
-     * network.  A specific edge (Times Square to Central Park) can be
-     * blocked using the checkbox.
-     */
-    private void loadNYCCities() {
-        cities = new City[] {
-            new City("Times Square", 40.7580, -73.9855),
-            new City("Central Park", 40.7812, -73.9665),
-            new City("Empire State", 40.7484, -73.9857),
-            new City("Brooklyn Bridge", 40.7061, -73.9969),
-            new City("Statue of Liberty", 40.6892, -74.0445),
-            new City("Wall Street", 40.7060, -74.0086),
-            new City("Grand Central", 40.7527, -73.9772),
-            new City("One World Trade", 40.7127, -74.0134)
-        };
-        computeDistancesHaversine();
-        blocked = new boolean[cities.length][cities.length];
-        // optionally block the edge between Times Square (0) and Central Park (1)
-        // the checkbox state will be evaluated at run time
-    }
-
-    /**
-     * Computes Euclidean distances between cities for the random instance.
-     */
-    private void computeDistances() {
-        int n = cities.length;
-        distances = new double[n][n];
-        for (int i = 0; i < n; i++) {
-            for (int j = 0; j < n; j++) {
-                if (i == j) {
-                    distances[i][j] = 0;
-                } else {
-                    double dx = cities[i].x - cities[j].x;
-                    double dy = cities[i].y - cities[j].y;
-                    distances[i][j] = Math.hypot(dx, dy);
-                }
-            }
-        }
-    }
-
-    /**
-     * Computes geodesic distances using the haversine formula for NYC.
-     */
-    private void computeDistancesHaversine() {
-        int n = cities.length;
-        distances = new double[n][n];
-        double R = 6371.0; // Earth radius in km
-        for (int i = 0; i < n; i++) {
-            for (int j = 0; j < n; j++) {
-                if (i == j) {
-                    distances[i][j] = 0;
-                } else {
-                    double lat1 = Math.toRadians(cities[i].x);
-                    double lon1 = Math.toRadians(cities[i].y);
-                    double lat2 = Math.toRadians(cities[j].x);
-                    double lon2 = Math.toRadians(cities[j].y);
-                    double dlat = lat2 - lat1;
-                    double dlon = lon2 - lon1;
-                    double a = Math.sin(dlat / 2) * Math.sin(dlat / 2) +
-                               Math.cos(lat1) * Math.cos(lat2) *
-                               Math.sin(dlon / 2) * Math.sin(dlon / 2);
-                    double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-                    distances[i][j] = R * c; // kilometres
-                }
-            }
-        }
-    }
-
-    /**
-     * Runs the ACO algorithm in simulation mode.  A solver instance is
-     * created from the current parameter settings and the selected
-     * dataset (random or NYC).  Each iteration constructs tours for
-     * every ant, updates pheromones and the best tour, and repaints
-     * the drawing panel to visualise progress.  A small delay between
-     * iterations allows the user to observe the process.  All work is
-     * performed on a background thread to keep the UI responsive.
-     */
-    private void runSimulation() {
-        // parse parameters
-        final int ants;
-        final int iterations;
-        final double alpha;
-        final double beta;
-        final double evap;
-        final double Q;
-        try {
-            ants = Integer.parseInt(antsField.getText().trim());
-            iterations = Integer.parseInt(iterationsField.getText().trim());
-            alpha = Double.parseDouble(alphaField.getText().trim());
-            beta = Double.parseDouble(betaField.getText().trim());
-            evap = Double.parseDouble(evaporationField.getText().trim());
-            Q = Double.parseDouble(qField.getText().trim());
-        } catch (NumberFormatException ex) {
-            JOptionPane.showMessageDialog(this, "Invalid parameter: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
-            return;
-        }
-        // prepare blocked edges for NYC
-        if ("NYC Example".equals(datasetCombo.getSelectedItem())) {
-            for (int i = 0; i < blocked.length; i++) {
-                for (int j = 0; j < blocked.length; j++) {
-                    blocked[i][j] = false;
-                }
-            }
-            if (blockCheck.isSelected()) {
-                blocked[0][1] = true;
-                blocked[1][0] = true;
-            }
-        }
-        simulationRunning = true;
-        currentTours = null;
-        statusLabel.setText("Running...");
-        // disable input fields during simulation
-        antsField.setEnabled(false);
-        iterationsField.setEnabled(false);
-        alphaField.setEnabled(false);
-        betaField.setEnabled(false);
-        evaporationField.setEnabled(false);
-        qField.setEnabled(false);
-        datasetCombo.setEnabled(false);
-        blockCheck.setEnabled(false);
-        cityCountField.setEnabled(false);
-        // create solver instance
-        final ACO solver = new ACO(ants, iterations, alpha, beta, evap, Q, distances, blocked);
-
-        // Generate a distinct colour palette for each ant.  We use
-        // uniformly spaced hues in the HSB colour space to ensure
-        // clearly distinguishable colours.  Saturation and brightness
-        // values are set to 0.7 for vivid pastel tones.  The array
-        // length equals the number of ants specified by the user.
-        antColors = new Color[ants];
-        for (int i = 0; i < ants; i++) {
-            float hue = i / (float) ants;
-            antColors[i] = Color.getHSBColor(hue, 0.7f, 0.8f);
-        }
-        bestTour = null;
-        // run on new thread
-        new Thread(() -> {
-            for (int iter = 0; iter < iterations && simulationRunning; iter++) {
-                // perform one iteration and capture tours
-                currentTours = solver.iterateOnce();
-                bestTour = solver.bestTour;
-                // update UI on EDT
-                int iterDisplay = iter + 1;
-                double lengthDisplay = solver.bestLength;
-                SwingUtilities.invokeLater(() -> {
-                    drawingPanel.repaint();
-                    statusLabel.setText(String.format("Iteration %d / %d, best length: %.2f", iterDisplay, iterations, lengthDisplay));
-                });
-                // delay to visualise progress.  The current animationDelay
-                // value is read on each iteration; it can be modified via
-                // the speed slider while the simulation is running.
-                try {
-                    Thread.sleep(animationDelay);
-                } catch (InterruptedException e) {
-                    // ignore
-                }
-            }
-            // simulation finished
-            SwingUtilities.invokeLater(() -> {
-                simulationRunning = false;
-                statusLabel.setText(String.format("Finished. Best length: %.2f", solver.bestLength));
-                // re-enable controls
-                antsField.setEnabled(true);
-                iterationsField.setEnabled(true);
-                alphaField.setEnabled(true);
-                betaField.setEnabled(true);
-                evaporationField.setEnabled(true);
-                qField.setEnabled(true);
-                datasetCombo.setEnabled(true);
-                blockCheck.setEnabled(true);
-                // re-enable city count field only when the random dataset is selected
-                if ("Random".equals(datasetCombo.getSelectedItem())) {
-                    cityCountField.setEnabled(true);
-                    // disable road block checkbox for random dataset
-                    blockCheck.setEnabled(false);
-                }
-                JOptionPane.showMessageDialog(AntColonyTSP.this,
-                        String.format("Best tour length: %.2f", solver.bestLength),
-                        "ACO result", JOptionPane.INFORMATION_MESSAGE);
-            });
-        }).start();
-    }
-
     /**
      * Panel responsible for drawing the cities and the best tour.
      */
     class DrawingPanel extends JPanel {
         private final int CITY_RADIUS = 8;
+
         @Override
         protected void paintComponent(Graphics g) {
             super.paintComponent(g);
@@ -1017,14 +1016,5 @@ public class AntColonyTSP extends JFrame {
                 g2.drawString(cities[i].name, p.x + CITY_RADIUS, p.y - CITY_RADIUS);
             }
         }
-    }
-
-    public static void main(String[] args) {
-        SwingUtilities.invokeLater(new Runnable() {
-            @Override
-            public void run() {
-                new AntColonyTSP();
-            }
-        });
     }
 }
