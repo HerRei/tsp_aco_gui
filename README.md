@@ -1,8 +1,7 @@
-A small Java Swing app that visualizes an Ant Colony Optimization (ACO) approach to the Traveling Salesman Problem (TSP).  
-It can generate random city sets or use a small NYC landmark dataset (optionally drawn over a background map).
+This was a small project for a final assignment, at Unibasel. It was about Meta-Heuristic Algorithms. I built this to have a tool to experiment and show my findings. Most of the online tools i found for ACO were very performance constraint so this was the main point of concern. 
 
 Features
-- Random dataset**: generate `N` cities and solve/visualize the TSP tour.
+- Random dataset**: generate *N* cities and solve/visualize the TSP tour.
 - NYC dataset**: fixed landmarks + optional `nyc_map.png` background.
 - Live visualization**: shows current ant tours (semi-transparent) and the best tour found so far.
 - Adjustable parameters**: ants, iterations, alpha, beta, rho (evaporation), Q, and animation delay.
